@@ -10,13 +10,18 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import memory
+
 # ---------- Settings ----------
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "qwen3:4b"
-HISTORY_LIMIT = 12      # recent messages the AI sees (lower = faster)
-MAX_STEPS = 5           # max tool-calling rounds per message
-NUM_CTX = 8192          # context window (tools + prompt need more than the 4096 default)
-KEEP_ALIVE = "30m"      # keep the model loaded in RAM between messages
+FAST_MODEL = "qwen3:4b-instruct"   # default: no thinking, fast, good at tools
+THINK_MODEL = "qwen3:4b"           # used when you type /think on
+HISTORY_LIMIT = 10                 # recent messages the AI sees (lower = faster)
+MAX_STEPS = 5                      # max tool-calling rounds per message
+NUM_CTX = 8192
+KEEP_ALIVE = "30m"
+MEMORY_TOP_K = 3
+MIN_MEMORY_SCORE = 0.6             # raise = stricter recall, lower = recalls more
 
 BASE = Path(__file__).parent
 DB_PATH = BASE / "jarvis.db"
@@ -161,7 +166,9 @@ def habit_stats(habit: str = None) -> str:
     week_ago = (date.today() - timedelta(days=6)).isoformat()
     with db() as c:
         if habit:
-            habits = c.execute("SELECT id, name FROM habits WHERE name LIKE ?", (f"%{habit.strip().lower()}%",)).fetchall()
+            habits = c.execute(
+                "SELECT id, name FROM habits WHERE name LIKE ?", (f"%{habit.strip().lower()}%",)
+            ).fetchall()
         else:
             habits = c.execute("SELECT id, name FROM habits ORDER BY name").fetchall()
         if not habits:
@@ -172,7 +179,9 @@ def habit_stats(habit: str = None) -> str:
             week = c.execute(
                 "SELECT COUNT(*) n FROM habit_logs WHERE habit_id = ? AND day >= ?", (h["id"], week_ago)
             ).fetchone()["n"]
-            lines.append(f"{h['name']}: streak {_streak(c, h['id'])} day(s), {week}/7 days this week, {total} total")
+            lines.append(
+                f"{h['name']}: streak {_streak(c, h['id'])} day(s), {week}/7 days this week, {total} total"
+            )
     return "\n".join(lines)
 
 
@@ -190,7 +199,9 @@ def set_reminder(text: str, remind_at: str) -> str:
 
 def list_reminders() -> str:
     with db() as c:
-        rows = c.execute("SELECT id, text, remind_at FROM reminders WHERE fired = 0 ORDER BY remind_at").fetchall()
+        rows = c.execute(
+            "SELECT id, text, remind_at FROM reminders WHERE fired = 0 ORDER BY remind_at"
+        ).fetchall()
     if not rows:
         return "No pending reminders."
     return "\n".join(f"#{r['id']} {r['remind_at']}: {r['text']}" for r in rows)
@@ -263,27 +274,28 @@ def run_tool(name: str, args) -> str:
         return f"Error while running {name}: {e}"
 
 
-# ---------- Prompt ----------
+# ---------- Prompt (kept static so Ollama can cache it) ----------
 def build_system_prompt() -> str:
     profile = PROFILE_PATH.read_text(encoding="utf-8") if PROFILE_PATH.exists() else ""
     with db() as c:
         facts = [r["fact"] for r in c.execute("SELECT fact FROM facts ORDER BY id")]
     facts_text = "\n".join(f"- {f}" for f in facts) or "(nothing yet)"
-    now = datetime.now()
 
     return f"""You are Jarvis, a personal AI assistant for one person: your owner.
-Be concise, warm and practical. Never invent facts about the owner.
+Be warm and practical. Keep replies to 1-2 short sentences unless asked for detail.
+Never invent facts about the owner.
 
-Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M')}
+The current date and time is given at the start of each owner message.
 
 TOOL RULES:
 - To add/list/complete tasks, log habits, set reminders or remember facts, you MUST call
   the matching tool. Never claim you did something without calling the tool.
-- Convert relative times ("tomorrow 6pm", "in 2 hours", "next Monday") into exact
-  'YYYY-MM-DD HH:MM' (24h) using the current date and time above.
+- Convert relative times ("tomorrow 6pm", "in 2 hours") into exact
+  'YYYY-MM-DD HH:MM' (24h) using the current date and time.
 - To complete a task, call list_tasks first if you don't know its id.
 - If the owner shares a lasting personal fact or preference, call save_fact.
-- After tools return, confirm briefly in plain language.
+- After a tool returns, confirm in ONE short sentence.
+- If notes from memory are provided and relevant, use them. Otherwise ignore them.
 
 ABOUT THE OWNER (profile):
 {profile}
@@ -291,6 +303,16 @@ ABOUT THE OWNER (profile):
 THINGS YOU REMEMBER:
 {facts_text}
 """
+
+
+def build_user_turn(user_message: str, memories: list) -> str:
+    stamp = datetime.now().strftime("%A, %Y-%m-%d %H:%M")
+    parts = ["[Current time: " + stamp + "]"]
+    if memories:
+        notes = "\n".join("- (" + m["label"] + ") " + m["text"] for m in memories)
+        parts.append("[Notes from your memory, use only if relevant:]\n" + notes)
+    parts.append(user_message)
+    return "\n".join(parts)
 
 
 def load_history() -> list:
@@ -307,30 +329,46 @@ def ev(kind: str, **data) -> str:
 
 
 def agent_stream(user_message: str, think: bool):
+    model = THINK_MODEL if think else FAST_MODEL
+
+    memories = []
+    try:
+        memories = memory.search(user_message, top_k=MEMORY_TOP_K, min_score=MIN_MEMORY_SCORE)
+    except Exception:
+        memories = []
+    if memories:
+        yield ev("memory", items=[{"source": m["label"], "score": round(m["score"], 2)} for m in memories])
+
     messages = (
         [{"role": "system", "content": build_system_prompt()}]
         + load_history()
-        + [{"role": "user", "content": user_message}]
+        + [{"role": "user", "content": build_user_turn(user_message, memories)}]
     )
-    final_text = ""
-    finished = False
+    final_text, finished, tools_used = "", False, False
 
     try:
-        for _ in range(MAX_STEPS):
+        for step in range(MAX_STEPS):
             content_buf, tool_calls = "", []
             payload = {
-                "model": MODEL,
+                "model": model,
                 "messages": messages,
                 "tools": TOOL_SCHEMAS,
                 "stream": True,
-                "think": think,
                 "keep_alive": KEEP_ALIVE,
                 "options": {"num_ctx": NUM_CTX},
             }
+            # Instruct models have no thinking switch; thinking models do.
+            # Thinking is used only for the first step, never for the confirmation round.
+            if "instruct" not in model:
+                payload["think"] = think and step == 0
+
             with httpx.stream("POST", OLLAMA_URL, json=payload, timeout=None) as resp:
                 if resp.status_code != 200:
                     resp.read()
-                    yield ev("error", text=f"Ollama returned {resp.status_code}: {resp.text[:300]}")
+                    hint = ""
+                    if resp.status_code == 404:
+                        hint = " (model not found: run  ollama pull " + model + ")"
+                    yield ev("error", text="Ollama returned " + str(resp.status_code) + ": " + resp.text[:200] + hint)
                     return
                 for line in resp.iter_lines():
                     if not line:
@@ -348,6 +386,7 @@ def agent_stream(user_message: str, think: bool):
                 final_text, finished = content_buf, True
                 break
 
+            tools_used = True
             messages.append({"role": "assistant", "content": content_buf, "tool_calls": tool_calls})
             for call in tool_calls:
                 fn = call.get("function", {})
@@ -359,7 +398,7 @@ def agent_stream(user_message: str, think: bool):
         if not finished:
             yield ev("error", text="Stopped: too many tool steps in one message.")
     except httpx.HTTPError as e:
-        yield ev("error", text=f"Could not reach Ollama. Is it running? ({e})")
+        yield ev("error", text="Could not reach Ollama. Is it running? (" + str(e) + ")")
         return
 
     final_text = re.sub(r"<think>.*?</think>", "", final_text, flags=re.DOTALL).strip()
@@ -369,11 +408,19 @@ def agent_stream(user_message: str, think: bool):
             c.execute("INSERT INTO messages (role, content, ts) VALUES ('assistant', ?, ?)", (final_text, now_str()))
     yield ev("done")
 
+    # Learn from the conversation AFTER the reply is finished (no extra waiting for you).
+    # Only longer messages without tool use are saved; your own words only, not Jarvis's.
+    if not tools_used and len(user_message) > 40:
+        try:
+            memory.add_chunks("chat:" + date.today().isoformat(), [user_message])
+        except Exception:
+            pass
+
 
 # ---------- API ----------
 class ChatIn(BaseModel):
     message: str
-    think: bool = True
+    think: bool = False
 
 
 class FactIn(BaseModel):
@@ -382,7 +429,7 @@ class FactIn(BaseModel):
 
 @app.get("/")
 def health():
-    return {"status": "Jarvis is running", "model": MODEL}
+    return {"status": "Jarvis is running", "fast_model": FAST_MODEL, "think_model": THINK_MODEL}
 
 
 @app.post("/chat")
@@ -409,6 +456,20 @@ def api_due_reminders():
         ).fetchall()
         c.executemany("UPDATE reminders SET fired = 1 WHERE id = ?", [(r["id"],) for r in rows])
     return [dict(r) for r in rows]
+
+
+@app.get("/memory/stats")
+def api_memory_stats():
+    return memory.stats()
+
+
+@app.get("/memory/search")
+def api_memory_search(q: str):
+    try:
+        hits = memory.search(q, top_k=5, min_score=0.0)
+    except Exception as e:
+        return {"error": str(e)}
+    return {"results": [{"source": h["label"], "score": round(h["score"], 2), "text": h["text"][:200]} for h in hits]}
 
 
 @app.post("/facts")
