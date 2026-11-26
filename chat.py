@@ -57,7 +57,7 @@ def stream_chat(message: str, think: bool):
                 print(f"{DIM}{e['text']}{RESET}", end="", flush=True)
             elif kind == "content":
                 if state != "content":
-                    print(f"\n{GREEN}Jarvis:{RESET} ", end="")
+                    print(f"\n{GREEN}LOKI:{RESET} ", end="")
                     state = "content"
                 print(e["text"], end="", flush=True)
             elif kind == "tool":
@@ -87,7 +87,7 @@ def main():
         return
 
     think = False
-    print(f"Connected to Jarvis (fast model: {info['fast_model']}). Thinking is OFF.")
+    print(f"Connected to LOKI (fast model: {info['fast_model']}). Thinking is OFF.")
     print(HELP)
 
     while True:

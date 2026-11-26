@@ -71,19 +71,28 @@
   .section { margin: 12px 0 2px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .empty { color: var(--muted); padding: 12px 4px; }
   .meta { font-size: 12px; color: var(--muted); }
+
+  .voicebar { display: flex; align-items: center; gap: 8px; padding: 6px 14px 0; font-size: 12px; color: var(--muted); }
+  .voicebar label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .voicebar select { max-width: 150px; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 2px 4px; font: inherit; font-size: 12px; color-scheme: dark; }
+  .voicebar button { padding: 1px 8px; font-size: 12px; }
+  #voice-status { flex: 1; text-align: right; color: var(--accent2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #mic.listening { background: var(--bad); border-color: var(--bad); animation: rec 1s ease-in-out infinite; }
+  @keyframes rec { 50% { opacity: 0.6; } }
 </style>
 </head>
 <body>
 <div id="app">
   <header>
-    <div class="title"><span id="status"></span>Jarvis</div>
+    <div class="title"><span id="status"></span>LOKI</div>
     <div class="hbtns">
       <button id="pin" title="Keep the panel open when you click elsewhere">Pin</button>
-      <button id="quit" title="Quit Jarvis">Quit</button>
+      <button id="quit" title="Quit LOKI">Quit</button>
       <button id="close" title="Close (Esc)">Close</button>
     </div>
   </header>
-  <div id="offline">Backend offline. Start it with start-jarvis.bat, or run: uvicorn main:app</div>
+  <div id="offline">Backend offline. Start it with start-loki.bat, or run: uvicorn main:app</div>
 
   <nav>
     <button data-tab="chat" class="active">Chat</button>
@@ -93,9 +102,16 @@
 
   <section id="tab-chat" class="tab active">
     <div id="messages"></div>
+    <div class="voicebar">
+      <label><input type="checkbox" id="speak"> Speak replies</label>
+      <select id="voice-select" title="Voice"></select>
+      <button id="stop-speak" style="display:none">Stop</button>
+      <span id="voice-status"></span>
+    </div>
     <div class="composer">
       <label class="think-toggle"><input type="checkbox" id="think"> Think</label>
-      <textarea id="input" rows="1" placeholder="Ask Jarvis anything..."></textarea>
+      <textarea id="input" rows="1" placeholder="Ask LOKI anything..."></textarea>
+      <button id="mic" title="Talk to LOKI (Ctrl+Alt+V)">Mic</button>
       <button id="send">Send</button>
     </div>
   </section>
@@ -190,9 +206,11 @@
     return m;
   }
 
-  async function sendMessage(text) {
+  async function sendMessage(text, viaVoice = false) {
     if (busy || !text.trim()) return;
     busy = true;
+    stopSpeaking();
+    const speakThis = viaVoice || $('#speak').checked;
     $('#send').disabled = true;
     addMsg('user', text);
     const bot = addMsg('assistant', '');
@@ -218,6 +236,7 @@
         }
         if (!curText) { curText = el('div'); bot.append(curText); }
         curText.textContent += e.text;
+        if (speakThis) ttsFeed(e.text);
       } else if (e.type === 'tool') {
         const args = Object.entries(e.args || {}).map(([k, v]) => k + '=' + JSON.stringify(v)).join(', ');
         bot.append(el('div', 'chip', e.name + '(' + args + ')\n-> ' + e.result));
@@ -251,6 +270,7 @@
     } catch (err) {
       bot.append(el('div', 'chip err', 'Error: ' + err.message));
     }
+    if (speakThis) ttsFlush();
     busy = false;
     $('#send').disabled = false;
     $('#input').focus();
@@ -353,7 +373,199 @@
   $('#habit-add').onclick = addHabit;
   $('#habit-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') addHabit(); });
 
-  addMsg('system', 'Ready. Press Ctrl+Alt+Space anytime to open or close this panel.');
+  // ---------- Voice ----------
+  const SPEECH_RMS = 0.015;    // louder than this counts as speech (raise it if background noise keeps it listening)
+  const SILENCE_MS = 1400;     // this much quiet after you speak = you're done
+  const NO_SPEECH_MS = 7000;   // give up if nothing is said
+  const MAX_RECORD_MS = 30000;
+
+  const rec = { active: false };
+  let ttsBuf = '';
+  let voices = [];
+  const voiceStatus = (t) => { $('#voice-status').textContent = t; };
+
+  // --- Speaking (built-in Windows voices, offline) ---
+  function pickVoice() {
+    let saved = null;
+    try { saved = localStorage.getItem('voiceName'); } catch { /* ignore */ }
+    return voices.find((v) => v.name === saved)
+      || voices.find((v) => v.lang === 'en-IN')
+      || voices.find((v) => v.lang.startsWith('en'))
+      || voices[0] || null;
+  }
+
+  function fillVoices() {
+    voices = speechSynthesis.getVoices().filter((v) => v.localService);
+    const sel = $('#voice-select');
+    sel.replaceChildren();
+    voices.forEach((v) => {
+      const o = el('option', null, v.name.replace('Microsoft ', '') + ' (' + v.lang + ')');
+      o.value = v.name;
+      sel.append(o);
+    });
+    const v = pickVoice();
+    if (v) sel.value = v.name;
+  }
+
+  function speakChunk(text) {
+    const clean = text
+      .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '')
+      .replace(/[*_`#>~]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!clean) return;
+    const u = new SpeechSynthesisUtterance(clean);
+    const v = pickVoice();
+    if (v) u.voice = v;
+    u.rate = 1.05;
+    speechSynthesis.speak(u);
+  }
+
+  function ttsFeed(t) {
+    ttsBuf += t;
+    let m;
+    while ((m = ttsBuf.match(/^([\s\S]*?(?:[.!?]+\s+|\n+))/))) {
+      speakChunk(m[1]);
+      ttsBuf = ttsBuf.slice(m[0].length);
+    }
+  }
+  function ttsFlush() {
+    if (ttsBuf.trim()) speakChunk(ttsBuf);
+    ttsBuf = '';
+  }
+  function stopSpeaking() {
+    ttsBuf = '';
+    speechSynthesis.cancel();
+  }
+
+  speechSynthesis.onvoiceschanged = fillVoices;
+  $('#voice-select').onchange = () => {
+    try { localStorage.setItem('voiceName', $('#voice-select').value); } catch { /* ignore */ }
+    stopSpeaking();
+    speakChunk('Hi, I am Loki.');
+  };
+  try { $('#speak').checked = localStorage.getItem('speak') === '1'; } catch { /* ignore */ }
+  $('#speak').onchange = () => {
+    try { localStorage.setItem('speak', $('#speak').checked ? '1' : '0'); } catch { /* ignore */ }
+    if (!$('#speak').checked) stopSpeaking();
+  };
+  $('#stop-speak').onclick = stopSpeaking;
+  setInterval(() => {
+    $('#stop-speak').style.display = speechSynthesis.speaking ? 'inline-block' : 'none';
+  }, 400);
+
+  // --- Listening (microphone -> offline Whisper on the backend) ---
+  function setMic(on) {
+    $('#mic').classList.toggle('listening', on);
+    $('#mic').textContent = on ? 'Stop' : 'Mic';
+  }
+
+  function toPcm16(chunks) {
+    let n = 0;
+    chunks.forEach((c) => { n += c.length; });
+    const out = new Int16Array(n);
+    let o = 0;
+    for (const c of chunks) {
+      for (let i = 0; i < c.length; i++) {
+        const s = Math.max(-1, Math.min(1, c[i]));
+        out[o++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+    }
+    return out;
+  }
+
+  async function startListening() {
+    if (rec.active) return;
+    if (busy) { voiceStatus('Wait for the reply to finish.'); return; }
+    stopSpeaking();
+    try {
+      rec.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+    } catch {
+      voiceStatus('Microphone blocked. Windows Settings > Privacy > Microphone.');
+      return;
+    }
+    rec.ctx = new AudioContext({ sampleRate: 16000 });
+    await rec.ctx.resume();
+    rec.src = rec.ctx.createMediaStreamSource(rec.stream);
+    rec.proc = rec.ctx.createScriptProcessor(4096, 1, 1);
+    rec.chunks = [];
+    rec.heard = false;
+    rec.silentSince = 0;
+    rec.startedAt = performance.now();
+    rec.active = true;
+
+    rec.proc.onaudioprocess = (ev) => {
+      if (!rec.active) return;
+      const data = ev.inputBuffer.getChannelData(0);
+      rec.chunks.push(new Float32Array(data));
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      const rms = Math.sqrt(sum / data.length);
+      const now = performance.now();
+      if (rms > SPEECH_RMS) {
+        rec.heard = true;
+        rec.silentSince = 0;
+      } else if (rec.heard) {
+        if (!rec.silentSince) rec.silentSince = now;
+        else if (now - rec.silentSince > SILENCE_MS) finishListening(true);
+      }
+      if (!rec.heard && now - rec.startedAt > NO_SPEECH_MS) finishListening(false, "Didn't hear anything.");
+      if (now - rec.startedAt > MAX_RECORD_MS) finishListening(true);
+    };
+    rec.src.connect(rec.proc);
+    rec.proc.connect(rec.ctx.destination);
+    setMic(true);
+    voiceStatus('Listening... speak, then pause.');
+  }
+
+  function finishListening(send, note) {
+    if (!rec.active) return;
+    rec.active = false;
+    try {
+      rec.proc.disconnect();
+      rec.src.disconnect();
+      rec.stream.getTracks().forEach((t) => t.stop());
+      rec.ctx.close();
+    } catch { /* ignore */ }
+    setMic(false);
+    if (!send) { voiceStatus(note || ''); return; }
+    const pcm = toPcm16(rec.chunks);
+    rec.chunks = [];
+    transcribeAndSend(pcm);
+  }
+
+  async function transcribeAndSend(pcm) {
+    voiceStatus('Transcribing...');
+    try {
+      const res = await fetch(API + '/voice/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: pcm.buffer,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Transcription failed');
+      if (data.text) {
+        voiceStatus('');
+        sendMessage(data.text, true);
+      } else {
+        voiceStatus("Didn't catch that. Try again.");
+      }
+    } catch (e) {
+      voiceStatus('Voice error: ' + e.message);
+    }
+  }
+
+  function toggleListening() { rec.active ? finishListening(true) : startListening(); }
+  $('#mic').onclick = toggleListening;
+  window.jarvis.onVoiceToggle(toggleListening);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { finishListening(false); stopSpeaking(); }
+  });
+  fillVoices();
+
+  addMsg('system', 'Ready. Ctrl+Alt+Space opens or closes this panel. Ctrl+Alt+V starts voice.');
   loadTasks(); loadHabits();
 </script>
 </body>

@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld('jarvis', {
   quit: () => ipcRenderer.send('app-quit'),
   onAlert: (cb) => ipcRenderer.on('dot-alert', () => cb()),
   onPanelShown: (cb) => ipcRenderer.on('panel-shown', () => cb()),
+  onVoiceToggle: (cb) => ipcRenderer.on('voice-toggle', () => cb()),
   onReminder: (cb) => ipcRenderer.on('reminder', (_event, r) => cb(r)),
 });

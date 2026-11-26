@@ -150,3 +150,8 @@ def setup(app):
         allow_headers=["*"],
     )
     app.include_router(router)
+    try:
+        import voice  # optional: offline speech-to-text
+        app.include_router(voice.router)
+    except Exception as e:
+        print("[voice] disabled:", e)

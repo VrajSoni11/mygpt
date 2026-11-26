@@ -1,12 +1,9 @@
 {
-  "name": "jarvis-desktop",
+  "name": "loki-desktop",
   "version": "0.1.0",
-  "description": "Personal AI assistant: floating dot and side panel",
+  "description": "LOKI personal AI assistant: floating dot and side panel",
   "main": "main.js",
   "scripts": {
     "start": "electron ."
-  },
-  "devDependencies": {
-    "electron": "^45.5.0"
   }
 }

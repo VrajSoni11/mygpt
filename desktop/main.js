@@ -1,10 +1,11 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Notification, Menu } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Notification, Menu, session } = require('electron');
 const path = require('path');
 
 const API = 'http://127.0.0.1:8000';
 const DOT_SIZE = 56;
 const PANEL_W = 420;
 const HOTKEY = 'Control+Alt+Space';
+const VOICE_HOTKEY = 'Control+Alt+V';
 
 let dotWin = null;
 let panelWin = null;
@@ -16,7 +17,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
 }
-app.setAppUserModelId('com.jarvis.personal');
+app.setAppUserModelId('com.loki.personal');
 
 function createDot() {
   const wa = screen.getPrimaryDisplay().workArea;
@@ -113,9 +114,9 @@ ipcMain.on('drag-move', () => {
 
 ipcMain.on('dot-menu', () => {
   Menu.buildFromTemplate([
-    { label: 'Open Jarvis', click: showPanel },
+    { label: 'Open LOKI', click: showPanel },
     { type: 'separator' },
-    { label: 'Quit Jarvis', click: () => app.quit() },
+    { label: 'Quit LOKI', click: () => app.quit() },
   ]).popup({ window: dotWin });
 });
 
@@ -126,7 +127,7 @@ async function checkReminders() {
     if (!res.ok) return;
     const due = await res.json();
     for (const r of due) {
-      new Notification({ title: 'Jarvis reminder', body: r.text }).show();
+      new Notification({ title: 'LOKI reminder', body: r.text }).show();
       if (dotWin && !dotWin.isDestroyed()) dotWin.webContents.send('dot-alert');
       if (panelWin && !panelWin.isDestroyed()) panelWin.webContents.send('reminder', r);
     }
@@ -136,9 +137,17 @@ async function checkReminders() {
 }
 
 app.whenReady().then(() => {
+  // Allow the microphone (and nothing else) for our own windows
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === 'media'));
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'media');
+
   createDot();
   createPanel();
   globalShortcut.register(HOTKEY, togglePanel);
+  globalShortcut.register(VOICE_HOTKEY, () => {
+    if (!panelVisible) showPanel();
+    panelWin.webContents.send('voice-toggle');
+  });
   setInterval(checkReminders, 15000);
 });
 
