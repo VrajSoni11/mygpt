@@ -87,8 +87,23 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT NOT NULL, remind_at TEXT NOT NULL,
                 fired INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
             """
         )
+        # Upgrade older databases: link every message to a conversation
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(messages)")]
+        if "conv_id" not in cols:
+            c.execute("ALTER TABLE messages ADD COLUMN conv_id INTEGER")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, id)")
+        old = c.execute("SELECT MIN(ts) a, MAX(ts) b, COUNT(*) n FROM messages WHERE conv_id IS NULL").fetchone()
+        if old["n"]:
+            cur = c.execute(
+                "INSERT INTO conversations (title, created, updated) VALUES (?, ?, ?)",
+                ("Earlier chats", old["a"], old["b"]),
+            )
+            c.execute("UPDATE messages SET conv_id = ? WHERE conv_id IS NULL", (cur.lastrowid,))
 
 
 init_db()
@@ -352,12 +367,46 @@ def build_user_turn(user_message: str, memories: list) -> str:
     return "\n".join(parts)
 
 
-def load_history() -> list:
+def load_history(conv_id=None) -> list:
+    if not conv_id:
+        return []
     with db() as c:
         rows = c.execute(
-            "SELECT role, content FROM messages ORDER BY id DESC LIMIT ?", (HISTORY_LIMIT,)
+            "SELECT role, content FROM messages WHERE conv_id = ? ORDER BY id DESC LIMIT ?",
+            (conv_id, HISTORY_LIMIT),
         ).fetchall()
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
+def save_exchange(conversation_id, user_message: str, reply: str):
+    """Stores one exchange. The first message of a chat creates the conversation (title = that message)."""
+    ts = now_str()
+    with db() as c:
+        conv = None
+        if conversation_id:
+            conv = c.execute(
+                "SELECT id, title FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        if conv is None:
+            title = " ".join(user_message.split())
+            title = (title[:47] + "...") if len(title) > 48 else (title or "New chat")
+            cur = c.execute(
+                "INSERT INTO conversations (title, created, updated) VALUES (?, ?, ?)", (title, ts, ts)
+            )
+            conv_id, conv_title = cur.lastrowid, title
+        else:
+            conv_id, conv_title = conv["id"], conv["title"]
+            c.execute("UPDATE conversations SET updated = ? WHERE id = ?", (ts, conv_id))
+        c.execute(
+            "INSERT INTO messages (role, content, ts, conv_id) VALUES ('user', ?, ?, ?)",
+            (user_message, ts, conv_id),
+        )
+        if reply:
+            c.execute(
+                "INSERT INTO messages (role, content, ts, conv_id) VALUES ('assistant', ?, ?, ?)",
+                (reply, ts, conv_id),
+            )
+    return conv_id, conv_title
 
 
 # ---------- Agent loop (streams events to the client) ----------
@@ -365,7 +414,7 @@ def ev(kind: str, **data) -> str:
     return json.dumps({"type": kind, **data}) + "\n"
 
 
-def agent_stream(user_message: str, think: bool):
+def agent_stream(user_message: str, think: bool, conversation_id: int = None):
     model = THINK_MODEL if think else FAST_MODEL
 
     memories = []
@@ -378,7 +427,7 @@ def agent_stream(user_message: str, think: bool):
 
     messages = (
         [{"role": "system", "content": build_system_prompt()}]
-        + load_history()
+        + load_history(conversation_id)
         + [{"role": "user", "content": build_user_turn(user_message, memories)}]
     )
     final_text, finished, tools_used = "", False, False
@@ -454,11 +503,8 @@ def agent_stream(user_message: str, think: bool):
         return
 
     final_text = re.sub(r"<think>.*?</think>", "", final_text, flags=re.DOTALL).strip()
-    with db() as c:
-        c.execute("INSERT INTO messages (role, content, ts) VALUES ('user', ?, ?)", (user_message, now_str()))
-        if final_text:
-            c.execute("INSERT INTO messages (role, content, ts) VALUES ('assistant', ?, ?)", (final_text, now_str()))
-    yield ev("done")
+    conv_id, conv_title = save_exchange(conversation_id, user_message, final_text)
+    yield ev("done", conversation_id=conv_id, title=conv_title)
 
     # Learn from the conversation AFTER the reply is finished (no extra waiting for you).
     # Only longer messages without tool use are saved; your own words only, not LOKI's.
@@ -473,6 +519,7 @@ def agent_stream(user_message: str, think: bool):
 class ChatIn(BaseModel):
     message: str
     think: bool = False
+    conversation_id: int | None = None
 
 
 class FactIn(BaseModel):
@@ -486,7 +533,7 @@ def health():
 
 @app.post("/chat")
 def chat(body: ChatIn):
-    return StreamingResponse(agent_stream(body.message, body.think), media_type="application/x-ndjson")
+    return StreamingResponse(agent_stream(body.message, body.think, body.conversation_id), media_type="application/x-ndjson")
 
 
 @app.get("/tasks")
@@ -547,4 +594,5 @@ def delete_fact(fact_id: int):
 def reset_history():
     with db() as c:
         c.execute("DELETE FROM messages")
+        c.execute("DELETE FROM conversations")
     return {"ok": True}

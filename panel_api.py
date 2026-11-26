@@ -1,4 +1,4 @@
-"""Extra endpoints for the desktop panel (tasks, habits, reminders as JSON).
+"""Extra endpoints for the desktop panel (conversations, tasks, habits, reminders as JSON).
 
 Hook it into main.py with two lines, right after  app = FastAPI(title="Jarvis"):
     import panel_api
@@ -127,6 +127,36 @@ def log_today(habit_id: int):
             "INSERT OR IGNORE INTO habit_logs (habit_id, day) VALUES (?, ?)",
             (habit_id, date.today().isoformat()),
         )
+    return {"ok": True}
+
+
+# ---------- Conversations (the chat history sidebar) ----------
+@router.get("/conversations")
+def list_conversations():
+    with db() as c:
+        rows = c.execute(
+            "SELECT id, title, updated FROM conversations ORDER BY updated DESC, id DESC LIMIT 300"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/conversations/{conv_id}")
+def get_conversation(conv_id: int):
+    with db() as c:
+        conv = c.execute("SELECT id, title FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        msgs = c.execute(
+            "SELECT role, content, ts FROM messages WHERE conv_id = ? ORDER BY id", (conv_id,)
+        ).fetchall()
+    return {"id": conv["id"], "title": conv["title"], "messages": [dict(m) for m in msgs]}
+
+
+@router.delete("/conversations/{conv_id}")
+def delete_conversation(conv_id: int):
+    with db() as c:
+        c.execute("DELETE FROM messages WHERE conv_id = ?", (conv_id,))
+        c.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
     return {"ok": True}
 
 

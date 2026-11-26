@@ -5,6 +5,7 @@ import sys
 import httpx
 
 API = "http://127.0.0.1:8000"
+STATE = {"conv": None}   # current conversation id
 
 DIM, GREEN, YELLOW, CYAN, RED, RESET = (
     "\033[2m", "\033[32m", "\033[33m", "\033[36m", "\033[31m", "\033[0m",
@@ -24,7 +25,8 @@ HELP = """Commands:
   /remember <fact>   save a permanent fact
   /facts             list saved facts
   /forget <id>       delete a fact
-  /reset             clear chat history (tasks, habits, facts, memory stay)
+  /new               start a new conversation
+  /reset             delete ALL chat history (tasks, habits, facts, memory stay)
   /quit              exit
 """
 
@@ -37,7 +39,7 @@ def call(method, path, **kwargs):
 
 def stream_chat(message: str, think: bool):
     state = None  # None / "thinking" / "content"
-    with httpx.stream("POST", API + "/chat", json={"message": message, "think": think}, timeout=None) as r:
+    with httpx.stream("POST", API + "/chat", json={"message": message, "think": think, "conversation_id": STATE["conv"]}, timeout=None) as r:
         if r.status_code != 200:
             r.read()
             print(f"{RED}Error {r.status_code}: {r.text}{RESET}")
@@ -65,6 +67,8 @@ def stream_chat(message: str, think: bool):
                 print(f"\n{YELLOW}[tool] {e['name']}({args}){RESET}")
                 print(f"{YELLOW}   -> {e['result']}{RESET}")
                 state = None
+            elif kind == "done":
+                STATE["conv"] = e.get("conversation_id")
             elif kind == "error":
                 print(f"\n{RED}{e['text']}{RESET}")
     print("\n")
@@ -126,8 +130,12 @@ def main():
         elif text.startswith("/forget "):
             call("DELETE", f"/facts/{text.split()[1]}")
             print("Deleted.")
+        elif text == "/new":
+            STATE["conv"] = None
+            print("New conversation started.")
         elif text == "/reset":
             call("POST", "/reset")
+            STATE["conv"] = None
             print("Chat history cleared.")
         else:
             try:

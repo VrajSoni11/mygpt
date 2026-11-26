@@ -2,8 +2,8 @@ const { app, BrowserWindow, globalShortcut, ipcMain, screen, Notification, Menu,
 const path = require('path');
 
 const API = 'http://127.0.0.1:8000';
-const DOT_SIZE = 56;
-const PANEL_W = 420;
+const DOT_SIZE = 76;
+const PANEL_W = 440;
 const HOTKEY = 'Control+Alt+Space';
 const VOICE_HOTKEY = 'Control+Alt+V';
 
@@ -54,7 +54,7 @@ function createPanel() {
     resizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
-    backgroundColor: '#14161a',
+    backgroundColor: '#050706',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
