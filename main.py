@@ -29,6 +29,22 @@ PROFILE_PATH = BASE / "profile.md"
 
 app = FastAPI(title="Jarvis")
 
+import panel_api
+panel_api.setup(app)
+
+
+# ---------- Guard against "fake" actions ----------
+# If the owner clearly asks for an action but the model answers without calling a tool,
+# the answer is held back, the model is told to call the tool, and if it still doesn't,
+# the owner gets an honest message instead of a false "done".
+ACTION_HINT = re.compile(
+    r"^\W*(please\s+|can you\s+|could you\s+)?"
+    r"(add|create|set|remind|log|mark|complete|finish|schedule)\b|\bremind me\b",
+    re.IGNORECASE,
+)
+RETRY_NUDGE = "You did not call a tool, so nothing was saved. Call the correct tool now. Do not write a reply first."
+NO_TOOL_REPLY = "I couldn't run that action, so nothing was saved. Please rephrase it, or use the Tasks tab."
+
 
 # ---------- Database ----------
 def db():
@@ -345,9 +361,13 @@ def agent_stream(user_message: str, think: bool):
         + [{"role": "user", "content": build_user_turn(user_message, memories)}]
     )
     final_text, finished, tools_used = "", False, False
+    expects_tool = bool(ACTION_HINT.search(user_message))
+    retried = False
 
     try:
         for step in range(MAX_STEPS):
+            # Until a tool has run, hold back text for action requests
+            hold = expects_tool and not tools_used
             content_buf, tool_calls = "", []
             payload = {
                 "model": model,
@@ -378,11 +398,20 @@ def agent_stream(user_message: str, think: bool):
                         yield ev("thinking", text=msg["thinking"])
                     if msg.get("content"):
                         content_buf += msg["content"]
-                        yield ev("content", text=msg["content"])
+                        if not hold:
+                            yield ev("content", text=msg["content"])
                     if msg.get("tool_calls"):
                         tool_calls.extend(msg["tool_calls"])
 
             if not tool_calls:
+                if hold:
+                    if not retried:
+                        retried = True
+                        messages.append({"role": "assistant", "content": content_buf})
+                        messages.append({"role": "user", "content": RETRY_NUDGE})
+                        continue
+                    content_buf = NO_TOOL_REPLY
+                    yield ev("content", text=content_buf)
                 final_text, finished = content_buf, True
                 break
 
