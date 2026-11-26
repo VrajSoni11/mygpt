@@ -4,130 +4,234 @@
 <meta charset="utf-8">
 <style>
   html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; user-select: none; }
-  canvas { display: block; width: 76px; height: 76px; cursor: pointer; }
+  canvas { display: block; width: 104px; height: 104px; cursor: pointer; }
 </style>
 </head>
 <body>
 <canvas id="orb"></canvas>
 <script>
-  const S = 76, C = S / 2, R = 24;          // window size, centre, orb radius
+  const S = 104, C = S / 2, R = 25;               // window size, centre, sphere radius
+  const TAU = Math.PI * 2;
   const cv = document.getElementById('orb');
   const dpr = window.devicePixelRatio || 1;
   cv.width = S * dpr; cv.height = S * dpr;
   const ctx = cv.getContext('2d');
   ctx.scale(dpr, dpr);
+  ctx.lineJoin = 'round';
 
   let alertOn = false, hover = false, last = 0, t = 0;
-  const bubbles = [], sparks = [];
 
-  function spawnBubble() {
-    bubbles.push({
-      x: C + (Math.random() * 2 - 1) * R * 0.62,
-      y: C + R * 0.85,
-      r: 1.4 + Math.random() * 3.4,
-      vy: 0.22 + Math.random() * 0.5,
-      ph: Math.random() * 6.28,
-      gold: Math.random() < 0.45,
-      age: 0,
+  // stable pseudo-random numbers so the pattern is the same on every launch
+  const rnd = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+
+  // ---- golden filaments from the core, reaching all the way to the rim ----
+  const gold = [];
+  for (let i = 0; i < 46; i++) {
+    gold.push({
+      a: (i / 46) * TAU + rnd(i) * 0.2,
+      curl: (rnd(i + 20) - 0.4) * 3.4,
+      len: 0.62 + rnd(i + 40) * 0.5,
+      start: rnd(i + 55) < 0.35 ? rnd(i + 56) * 0.28 : 0,
+      w: 0.5 + rnd(i + 60) * 0.6,
+      sp: 0.3 + rnd(i + 80) * 0.6,
+      ph: rnd(i + 100) * TAU,
+      br: (rnd(i + 120) - 0.5) * 1.6,               // sideways branch near the end
+      hasBranch: rnd(i + 130) < 0.6,
     });
   }
-  function spawnSpark() {
-    const a = Math.random() * 6.283;
-    sparks.push({
-      x: C + Math.cos(a) * (R + 1), y: C + Math.sin(a) * (R + 1),
-      vx: Math.cos(a) * 0.22 + (Math.random() - 0.5) * 0.1,
-      vy: Math.sin(a) * 0.22 - 0.12,
-      life: 1, size: 0.8 + Math.random() * 1.6, gold: Math.random() < 0.7,
+  // ---- green ribbons: mostly through the outer part of the sphere ----
+  const ribbons = [];
+  for (let i = 0; i < 9; i++) {
+    ribbons.push({
+      a: (i / 9) * TAU + rnd(i + 400) * 0.6,
+      curl: (rnd(i + 420) - 0.2) * 3.0,
+      len: 0.85 + rnd(i + 440) * 0.2,
+      start: 0.3 + rnd(i + 450) * 0.25,
+      w: 1.2 + rnd(i + 460) * 0.9,
+      sp: 0.25 + rnd(i + 480) * 0.4,
+      ph: rnd(i + 500) * TAU,
     });
+  }
+  // ---- long flowing streams leaving the sphere ----
+  const streams = [];
+  for (let j = 0; j < 10; j++) {
+    streams.push({
+      a: (j / 10) * TAU + rnd(j + 200) * 0.5,
+      curl: (rnd(j + 220) - 0.5) * 2.6,
+      len: 17 + rnd(j + 240) * 9,
+      sp: 0.35 + rnd(j + 260) * 0.5,
+      ph: rnd(j + 280) * TAU,
+      green: j % 3 === 1,
+      w: 0.65 + rnd(j + 300) * 0.8,
+    });
+  }
+  const sparks = [];
+
+  // point on a filament: u runs 0 (start) to 1 (end)
+  function pt(f, u, extra) {
+    const span = f.start || 0;
+    const r = (span + u * (f.len - span)) * R;
+    const ang = f.a + t * 0.12 + f.curl * (span + u * (f.len - span)) + Math.sin(t * f.sp + f.ph + u * 4) * 0.38 * u + (extra || 0);
+    return [C + Math.cos(ang) * r, C + Math.sin(ang) * r];
+  }
+
+  function trace(f, lw) {
+    ctx.beginPath();
+    const steps = 16;
+    for (let k = 0; k <= steps; k++) {
+      const [x, y] = pt(f, k / steps);
+      if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.lineWidth = lw;
+    ctx.stroke();
+    if (f.hasBranch) {                              // thin side branch for a lightning / root look
+      ctx.beginPath();
+      for (let k = 8; k <= steps; k++) {
+        const u = k / steps;
+        const [x, y] = pt(f, u, (u - 0.5) * f.br * 2.2);
+        if (k === 8) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.lineWidth = lw * 0.6;
+      ctx.stroke();
+    }
+  }
+
+  function drawStream(s, reach) {
+    const steps = 14;
+    const pts = [];
+    for (let k = 0; k <= steps; k++) {
+      const u = k / steps;
+      const r = R - 1 + u * s.len * reach;
+      const ang = s.a + t * 0.05 + s.curl * u + Math.sin(t * s.sp + s.ph + u * 3.2) * 0.32 * u;
+      pts.push([C + Math.cos(ang) * r, C + Math.sin(ang) * r]);
+    }
+    const col = s.green && !alertOn ? '90, 255, 120' : '255, 205, 80';
+    // one smooth stroke per stream, fading out along its length via a gradient
+    const a = pts[0], b = pts[steps];
+    const g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+    g.addColorStop(0, 'rgba(' + col + ',0.75)');
+    g.addColorStop(1, 'rgba(' + col + ',0)');
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let k = 1; k < steps; k++) {
+      const mx = (pts[k][0] + pts[k + 1][0]) / 2, my = (pts[k][1] + pts[k + 1][1]) / 2;
+      ctx.quadraticCurveTo(pts[k][0], pts[k][1], mx, my);
+    }
+    ctx.strokeStyle = g;
+    ctx.lineCap = 'butt';
+    ctx.lineWidth = s.w;
+    ctx.stroke();
   }
 
   function draw() {
     ctx.clearRect(0, 0, S, S);
-    const pulse = 0.5 + 0.5 * Math.sin(t * (alertOn ? 6 : 2));
+    const pulse = 0.5 + 0.5 * Math.sin(t * (alertOn ? 5 : 1.8));
+    const reach = alertOn ? 1.2 : hover ? 1.1 : 1;
 
-    // soft outer glow
-    const glow = ctx.createRadialGradient(C, C, R * 0.7, C, C, R + 13);
-    if (alertOn) {
-      glow.addColorStop(0, 'rgba(255, 214, 90,' + (0.55 + 0.3 * pulse) + ')');
-    } else {
-      glow.addColorStop(0, 'rgba(40, 210, 130,' + (0.30 + 0.14 * pulse) + ')');
-    }
-    glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    ctx.fillStyle = glow;
-    ctx.beginPath(); ctx.arc(C, C, R + 13, 0, 6.283); ctx.fill();
-
-    // orb body (clipped drawing from here)
-    ctx.save();
-    ctx.beginPath(); ctx.arc(C, C, R, 0, 6.283); ctx.clip();
-    const body = ctx.createRadialGradient(C - 7, C - 9, 2, C, C, R);
-    if (alertOn) {
-      body.addColorStop(0, '#fff0b0'); body.addColorStop(0.35, '#e0b73a');
-      body.addColorStop(0.75, '#6b4f0b'); body.addColorStop(1, '#1d1403');
-    } else {
-      body.addColorStop(0, '#6df5b6'); body.addColorStop(0.32, '#1fa968');
-      body.addColorStop(0.75, '#0a4a2e'); body.addColorStop(1, '#031a0f');
-    }
-    ctx.fillStyle = body;
-    ctx.fillRect(0, 0, S, S);
-
-    // swirling energy
+    // soft aura
     ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < 4; i++) {
-      const a = t * (0.55 + i * 0.27) + i * 1.9;
-      const bx = C + Math.cos(a) * R * 0.46;
-      const by = C + Math.sin(a * 1.3) * R * 0.42;
-      const useGold = alertOn ? i % 2 === 1 : i % 2 === 0;
-      const g = ctx.createRadialGradient(bx, by, 0, bx, by, R * 0.62);
-      g.addColorStop(0, useGold ? 'rgba(255, 205, 80, 0.40)' : 'rgba(70, 255, 170, 0.34)');
-      g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, S, S);
-    }
-    ctx.globalCompositeOperation = 'source-over';
+    const aura = ctx.createRadialGradient(C, C, R * 0.8, C, C, R + 18);
+    aura.addColorStop(0, 'rgba(255, 190, 50,' + ((alertOn ? 0.55 : 0.26) + 0.1 * pulse) + ')');
+    aura.addColorStop(0.6, 'rgba(70, 200, 90,' + (alertOn ? 0.12 : 0.07) + ')');
+    aura.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = aura;
+    ctx.beginPath(); ctx.arc(C, C, R + 18, 0, TAU); ctx.fill();
 
-    // bubbles rising inside the orb
-    for (let i = bubbles.length - 1; i >= 0; i--) {
-      const b = bubbles[i];
-      b.age += 1; b.y -= b.vy * (alertOn ? 1.8 : hover ? 1.4 : 1); b.x += Math.sin(b.ph + b.age * 0.09) * 0.28;
-      const top = C - R * 0.92;
-      const fade = Math.max(0, Math.min(1, (b.y - top) / 10)) * Math.min(1, b.age / 8);
-      if (b.y < top || fade <= 0) { bubbles.splice(i, 1); continue; }
-      const col = b.gold ? '255, 214, 100' : '150, 255, 205';
-      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.283);
-      ctx.fillStyle = 'rgba(' + col + ',' + (0.10 * fade) + ')'; ctx.fill();
-      ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(' + col + ',' + (0.85 * fade) + ')'; ctx.stroke();
-      ctx.beginPath(); ctx.arc(b.x - b.r * 0.35, b.y - b.r * 0.35, Math.max(0.5, b.r * 0.22), 0, 6.283);
-      ctx.fillStyle = 'rgba(255, 255, 255,' + (0.9 * fade) + ')'; ctx.fill();
+    for (const s of streams) drawStream(s, reach);
+
+    // glass sphere body
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.save();
+    ctx.beginPath(); ctx.arc(C, C, R, 0, TAU); ctx.clip();
+    const body = ctx.createRadialGradient(C, C, 2, C, C, R);
+    body.addColorStop(0, '#2a1d02'); body.addColorStop(0.5, '#0b1104'); body.addColorStop(1, '#040803');
+    ctx.fillStyle = body; ctx.fillRect(0, 0, S, S);
+
+    ctx.globalCompositeOperation = 'lighter';
+    const goldG = ctx.createRadialGradient(C, C, 0, C, C, R);
+    goldG.addColorStop(0, 'rgba(255, 238, 160, 1)');
+    goldG.addColorStop(0.45, 'rgba(255, 196, 64, 0.8)');
+    goldG.addColorStop(1, 'rgba(222, 160, 34, 0.6)');
+    const greenG = ctx.createRadialGradient(C, C, 0, C, C, R);
+    greenG.addColorStop(0, 'rgba(170, 255, 150, 0.7)');
+    greenG.addColorStop(1, 'rgba(50, 215, 85, 0.65)');
+
+    // green ribbons first (soft, wide), then the golden filaments over them
+    for (const f of ribbons) {
+      const g = alertOn ? goldG : greenG;
+      ctx.strokeStyle = g;
+      ctx.globalAlpha = 0.22; trace(f, f.w * 4.4);
+      ctx.globalAlpha = 0.9;  trace(f, f.w * 1.0);
     }
+    ctx.strokeStyle = goldG;
+    for (const f of gold) {
+      ctx.globalAlpha = 0.07; trace(f, f.w * 3.2);
+      ctx.globalAlpha = 0.9;  trace(f, f.w * 0.85);
+    }
+    ctx.globalAlpha = 1;
+
+    // small, hot golden core
+    const cr = (alertOn ? 13 : 9) + 2 * pulse;
+    const core = ctx.createRadialGradient(C, C, 0, C, C, cr);
+    core.addColorStop(0, 'rgba(255, 252, 225, 1)');
+    core.addColorStop(0.15, 'rgba(255, 224, 110, 0.95)');
+    core.addColorStop(0.5, 'rgba(255, 165, 35, 0.35)');
+    core.addColorStop(1, 'rgba(255, 150, 20, 0)');
+    ctx.fillStyle = core;
+    ctx.beginPath(); ctx.arc(C, C, cr, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 240, 190, 0.5)'; ctx.lineWidth = 0.6;
+    const ray = 6 + 3 * pulse;
+    ctx.beginPath();
+    ctx.moveTo(C - ray, C); ctx.lineTo(C + ray, C);
+    ctx.moveTo(C, C - ray); ctx.lineTo(C, C + ray);
+    ctx.stroke();
+
+    // glassy glow just inside the rim
+    ctx.globalCompositeOperation = 'source-over';
+    const rimGlow = ctx.createRadialGradient(C, C, R * 0.8, C, C, R);
+    rimGlow.addColorStop(0, 'rgba(255, 200, 80, 0)');
+    rimGlow.addColorStop(1, 'rgba(255, 205, 90, 0.4)');
+    ctx.fillStyle = rimGlow; ctx.fillRect(0, 0, S, S);
     ctx.restore();
 
-    // gold rim
-    const rim = ctx.createLinearGradient(C - R, C - R, C + R, C + R);
-    rim.addColorStop(0, '#fbe9a3'); rim.addColorStop(0.5, '#d4af37'); rim.addColorStop(1, '#7a5c10');
-    ctx.lineWidth = 1.7; ctx.strokeStyle = rim;
-    ctx.beginPath(); ctx.arc(C, C, R, 0, 6.283); ctx.stroke();
+    // thin glass edge with a brighter highlight on the upper left
+    const edge = ctx.createLinearGradient(C - R, C - R, C + R, C + R);
+    edge.addColorStop(0, 'rgba(255, 242, 175, 0.95)');
+    edge.addColorStop(0.5, 'rgba(205, 155, 45, 0.5)');
+    edge.addColorStop(1, 'rgba(255, 200, 80, 0.8)');
+    ctx.lineWidth = 1.1; ctx.strokeStyle = edge;
+    ctx.beginPath(); ctx.arc(C, C, R - 0.3, 0, TAU); ctx.stroke();
 
-    // sparks drifting off the edge
+    // golden dust drifting away
+    ctx.globalCompositeOperation = 'lighter';
     for (let i = sparks.length - 1; i >= 0; i--) {
-      const s = sparks[i];
-      s.x += s.vx; s.y += s.vy; s.life -= 0.022;
-      if (s.life <= 0) { sparks.splice(i, 1); continue; }
-      ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, 6.283);
-      ctx.fillStyle = (s.gold ? 'rgba(255, 220, 110,' : 'rgba(120, 255, 190,') + (0.9 * s.life) + ')';
-      ctx.fill();
+      const p = sparks[i];
+      p.x += p.vx; p.y += p.vy; p.life -= 0.018;
+      if (p.life <= 0) { sparks.splice(i, 1); continue; }
+      ctx.fillStyle = (p.green ? 'rgba(130, 255, 150,' : 'rgba(255, 215, 110,') + (0.9 * p.life) + ')';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, TAU); ctx.fill();
     }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function spawnSpark() {
+    const a = Math.random() * TAU, r = R + 2 + Math.random() * 12;
+    sparks.push({
+      x: C + Math.cos(a) * r, y: C + Math.sin(a) * r,
+      vx: Math.cos(a) * 0.18 + (Math.random() - 0.5) * 0.16,
+      vy: Math.sin(a) * 0.18 + (Math.random() - 0.5) * 0.16,
+      life: 1, s: 0.35 + Math.random() * 0.55, green: Math.random() < 0.25,
+    });
   }
 
   function frame(now) {
     requestAnimationFrame(frame);
-    if (now - last < 33) return;             // about 30 frames a second keeps CPU use tiny
+    if (now - last < 33) return;               // about 30 frames a second keeps CPU use tiny
     last = now;
-    t += 0.033 * (alertOn ? 2.2 : hover ? 1.6 : 1);
-    if (Math.random() < (alertOn ? 0.38 : hover ? 0.24 : 0.12) && bubbles.length < 14) spawnBubble();
-    if (Math.random() < (alertOn ? 0.35 : 0.09) && sparks.length < 12) spawnSpark();
+    t += 0.033 * (alertOn ? 2.4 : hover ? 1.5 : 1);
+    if (Math.random() < (alertOn ? 0.55 : 0.16) && sparks.length < 18) spawnSpark();
     draw();
   }
-  for (let i = 0; i < 6; i++) { spawnBubble(); bubbles[i].y -= Math.random() * R; }   // start already bubbling
   requestAnimationFrame(frame);
 
   // ---------- click, drag, right-click ----------
