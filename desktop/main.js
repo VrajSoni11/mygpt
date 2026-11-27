@@ -1,8 +1,10 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, Notification, Menu, session } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 const API = 'http://127.0.0.1:8000';
-const DOT_SIZE = 104;
+const DOT_BIG = 104;    // window size while the sphere is showing (on hover)
+const DOT_SMALL = 26;   // window size for the tiny dot at rest
 const PANEL_W = 440;
 const HOTKEY = 'Control+Alt+Space';
 const VOICE_HOTKEY = 'Control+Alt+V';
@@ -12,6 +14,7 @@ let panelWin = null;
 let panelVisible = false;
 let pinned = false;
 let dragOrigin = null;
+let dotSize = DOT_SMALL;
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -19,13 +22,51 @@ if (!app.requestSingleInstanceLock()) {
 }
 app.setAppUserModelId('com.loki.personal');
 
-function createDot() {
+const dotPosFile = () => path.join(app.getPath('userData'), 'dot-position.json');
+
+// Where the dot was last left (its centre), if that spot is still on a screen
+function loadDotCenter() {
+  try {
+    const { cx, cy } = JSON.parse(fs.readFileSync(dotPosFile(), 'utf8'));
+    const onScreen = screen.getAllDisplays().some((d) => {
+      const w = d.workArea;
+      return cx >= w.x && cx <= w.x + w.width && cy >= w.y && cy <= w.y + w.height;
+    });
+    if (onScreen) return { cx, cy };
+  } catch (e) {
+    // no saved position yet
+  }
   const wa = screen.getPrimaryDisplay().workArea;
+  return { cx: wa.x + wa.width - 56, cy: wa.y + Math.round(wa.height / 2) };
+}
+
+function saveDotCenter() {
+  if (!dotWin || dotWin.isDestroyed()) return;
+  const b = dotWin.getBounds();
+  try {
+    fs.writeFileSync(dotPosFile(), JSON.stringify({ cx: b.x + b.width / 2, cy: b.y + b.height / 2 }));
+  } catch (e) {
+    // not critical
+  }
+}
+
+// Grow or shrink the dot's window around its centre (so the dot never appears to jump)
+function setDotSize(size) {
+  if (!dotWin || dotWin.isDestroyed() || size === dotSize) return;
+  const b = dotWin.getBounds();
+  const cx = b.x + b.width / 2;
+  const cy = b.y + b.height / 2;
+  dotSize = size;
+  dotWin.setBounds({ x: Math.round(cx - size / 2), y: Math.round(cy - size / 2), width: size, height: size });
+}
+
+function createDot() {
+  const { cx, cy } = loadDotCenter();
   dotWin = new BrowserWindow({
-    width: DOT_SIZE,
-    height: DOT_SIZE,
-    x: wa.x + wa.width - DOT_SIZE - 12,
-    y: wa.y + Math.round(wa.height / 2),
+    width: DOT_SMALL,
+    height: DOT_SMALL,
+    x: Math.round(cx - DOT_SMALL / 2),
+    y: Math.round(cy - DOT_SMALL / 2),
     frame: false,
     transparent: true,
     resizable: false,
@@ -70,6 +111,8 @@ function createPanel() {
 function showPanel() {
   const wa = screen.getDisplayMatching(dotWin.getBounds()).workArea;
   panelWin.setBounds({ x: wa.x + wa.width - PANEL_W, y: wa.y, width: PANEL_W, height: wa.height });
+  setDotSize(DOT_SMALL);
+  dotWin.webContents.send('dot-reset');
   dotWin.hide();
   panelWin.show();
   panelWin.focus();
@@ -98,19 +141,21 @@ ipcMain.on('app-quit', () => app.quit());
 ipcMain.on('drag-start', () => {
   const c = screen.getCursorScreenPoint();
   const b = dotWin.getBounds();
-  dragOrigin = { cx: c.x, cy: c.y, x: b.x, y: b.y };
+  dragOrigin = { cx: c.x, cy: c.y, mx: b.x + b.width / 2, my: b.y + b.height / 2 };
 });
 ipcMain.on('drag-move', () => {
   if (!dragOrigin) return;
   const c = screen.getCursorScreenPoint();
-  // setBounds with a fixed size avoids window-size drift on scaled displays
-  dotWin.setBounds({
-    x: dragOrigin.x + c.x - dragOrigin.cx,
-    y: dragOrigin.y + c.y - dragOrigin.cy,
-    width: DOT_SIZE,
-    height: DOT_SIZE,
-  });
+  const mx = dragOrigin.mx + c.x - dragOrigin.cx;
+  const my = dragOrigin.my + c.y - dragOrigin.cy;
+  // fixed size on every call avoids window-size drift on scaled displays
+  dotWin.setBounds({ x: Math.round(mx - dotSize / 2), y: Math.round(my - dotSize / 2), width: dotSize, height: dotSize });
 });
+ipcMain.on('drag-end', () => {
+  dragOrigin = null;
+  saveDotCenter();
+});
+ipcMain.on('dot-size', (_e, mode) => setDotSize(mode === 'big' ? DOT_BIG : DOT_SMALL));
 
 ipcMain.on('dot-menu', () => {
   Menu.buildFromTemplate([

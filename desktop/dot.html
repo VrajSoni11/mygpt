@@ -4,13 +4,14 @@
 <meta charset="utf-8">
 <style>
   html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; user-select: none; }
-  canvas { display: block; width: 104px; height: 104px; cursor: pointer; }
+  /* The canvas is always 104px and centred; the window around it grows and shrinks. */
+  canvas { position: absolute; left: 50%; top: 50%; width: 104px; height: 104px; margin: -52px 0 0 -52px; cursor: pointer; }
 </style>
 </head>
 <body>
 <canvas id="orb"></canvas>
 <script>
-  const S = 104, C = S / 2, R = 25;               // window size, centre, sphere radius
+  const S = 104, C = S / 2, R = 25;               // canvas size, centre, sphere radius
   const TAU = Math.PI * 2;
   const cv = document.getElementById('orb');
   const dpr = window.devicePixelRatio || 1;
@@ -20,6 +21,11 @@
   ctx.lineJoin = 'round';
 
   let alertOn = false, hover = false, last = 0, t = 0;
+  let target = 0;          // 0 = tiny dot, 1 = full sphere
+  let grow = 0;            // current blend between the two (animated)
+  let expanded = false;    // is the window currently the big size?
+  let collapseTimer = null;
+  let down = false, moved = false, sx = 0, sy = 0;
 
   // stable pseudo-random numbers so the pattern is the same on every launch
   const rnd = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
@@ -35,7 +41,7 @@
       w: 0.5 + rnd(i + 60) * 0.6,
       sp: 0.3 + rnd(i + 80) * 0.6,
       ph: rnd(i + 100) * TAU,
-      br: (rnd(i + 120) - 0.5) * 1.6,               // sideways branch near the end
+      br: (rnd(i + 120) - 0.5) * 1.6,
       hasBranch: rnd(i + 130) < 0.6,
     });
   }
@@ -67,7 +73,6 @@
   }
   const sparks = [];
 
-  // point on a filament: u runs 0 (start) to 1 (end)
   function pt(f, u, extra) {
     const span = f.start || 0;
     const r = (span + u * (f.len - span)) * R;
@@ -84,7 +89,7 @@
     }
     ctx.lineWidth = lw;
     ctx.stroke();
-    if (f.hasBranch) {                              // thin side branch for a lightning / root look
+    if (f.hasBranch) {
       ctx.beginPath();
       for (let k = 8; k <= steps; k++) {
         const u = k / steps;
@@ -106,7 +111,6 @@
       pts.push([C + Math.cos(ang) * r, C + Math.sin(ang) * r]);
     }
     const col = s.green && !alertOn ? '90, 255, 120' : '255, 205, 80';
-    // one smooth stroke per stream, fading out along its length via a gradient
     const a = pts[0], b = pts[steps];
     const g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
     g.addColorStop(0, 'rgba(' + col + ',0.75)');
@@ -123,12 +127,11 @@
     ctx.stroke();
   }
 
-  function draw() {
-    ctx.clearRect(0, 0, S, S);
+  // ---------- the full sphere (shown on hover) ----------
+  function drawSphere() {
     const pulse = 0.5 + 0.5 * Math.sin(t * (alertOn ? 5 : 1.8));
     const reach = alertOn ? 1.2 : hover ? 1.1 : 1;
 
-    // soft aura
     ctx.globalCompositeOperation = 'lighter';
     const aura = ctx.createRadialGradient(C, C, R * 0.8, C, C, R + 18);
     aura.addColorStop(0, 'rgba(255, 190, 50,' + ((alertOn ? 0.55 : 0.26) + 0.1 * pulse) + ')');
@@ -139,7 +142,6 @@
 
     for (const s of streams) drawStream(s, reach);
 
-    // glass sphere body
     ctx.globalCompositeOperation = 'source-over';
     ctx.save();
     ctx.beginPath(); ctx.arc(C, C, R, 0, TAU); ctx.clip();
@@ -156,10 +158,8 @@
     greenG.addColorStop(0, 'rgba(170, 255, 150, 0.7)');
     greenG.addColorStop(1, 'rgba(50, 215, 85, 0.65)');
 
-    // green ribbons first (soft, wide), then the golden filaments over them
     for (const f of ribbons) {
-      const g = alertOn ? goldG : greenG;
-      ctx.strokeStyle = g;
+      ctx.strokeStyle = alertOn ? goldG : greenG;
       ctx.globalAlpha = 0.22; trace(f, f.w * 4.4);
       ctx.globalAlpha = 0.9;  trace(f, f.w * 1.0);
     }
@@ -170,7 +170,6 @@
     }
     ctx.globalAlpha = 1;
 
-    // small, hot golden core
     const cr = (alertOn ? 13 : 9) + 2 * pulse;
     const core = ctx.createRadialGradient(C, C, 0, C, C, cr);
     core.addColorStop(0, 'rgba(255, 252, 225, 1)');
@@ -186,7 +185,6 @@
     ctx.moveTo(C, C - ray); ctx.lineTo(C, C + ray);
     ctx.stroke();
 
-    // glassy glow just inside the rim
     ctx.globalCompositeOperation = 'source-over';
     const rimGlow = ctx.createRadialGradient(C, C, R * 0.8, C, C, R);
     rimGlow.addColorStop(0, 'rgba(255, 200, 80, 0)');
@@ -194,7 +192,6 @@
     ctx.fillStyle = rimGlow; ctx.fillRect(0, 0, S, S);
     ctx.restore();
 
-    // thin glass edge with a brighter highlight on the upper left
     const edge = ctx.createLinearGradient(C - R, C - R, C + R, C + R);
     edge.addColorStop(0, 'rgba(255, 242, 175, 0.95)');
     edge.addColorStop(0.5, 'rgba(205, 155, 45, 0.5)');
@@ -202,7 +199,6 @@
     ctx.lineWidth = 1.1; ctx.strokeStyle = edge;
     ctx.beginPath(); ctx.arc(C, C, R - 0.3, 0, TAU); ctx.stroke();
 
-    // golden dust drifting away
     ctx.globalCompositeOperation = 'lighter';
     for (let i = sparks.length - 1; i >= 0; i--) {
       const p = sparks[i];
@@ -212,6 +208,44 @@
       ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, TAU); ctx.fill();
     }
     ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // ---------- the tiny dot (shown at rest) ----------
+  function drawTiny(alpha) {
+    const pulse = 0.5 + 0.5 * Math.sin(t * 1.6);
+    const r = alertOn ? 4.4 + 1.8 * pulse : 4.2;
+    ctx.globalAlpha = alpha;
+    const glow = ctx.createRadialGradient(C, C, 0, C, C, 12);
+    if (alertOn) {
+      glow.addColorStop(0, 'rgba(255, 200, 70,' + (0.6 + 0.25 * pulse) + ')');
+      glow.addColorStop(1, 'rgba(255, 170, 40, 0)');
+    } else {
+      glow.addColorStop(0, 'rgba(46, 229, 154,' + (0.34 + 0.14 * pulse) + ')');
+      glow.addColorStop(1, 'rgba(31, 169, 104, 0)');
+    }
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(C, C, 12, 0, TAU); ctx.fill();
+    const body = ctx.createRadialGradient(C - 1.2, C - 1.4, 0.4, C, C, r);
+    if (alertOn) {
+      body.addColorStop(0, '#fff2b8'); body.addColorStop(0.5, '#f0b93a'); body.addColorStop(1, '#a8740e');
+    } else {
+      body.addColorStop(0, '#9dffd6'); body.addColorStop(0.5, '#25cc80'); body.addColorStop(1, '#12804c');
+    }
+    ctx.fillStyle = body;
+    ctx.beginPath(); ctx.arc(C, C, r, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, S, S);
+    if (grow > 0.02) {
+      const sc = 0.15 + 0.85 * grow;             // the sphere blooms out of the dot
+      ctx.save();
+      ctx.translate(C, C); ctx.scale(sc, sc); ctx.translate(-C, -C);
+      drawSphere();
+      ctx.restore();
+    }
+    if (grow < 0.98) drawTiny(1 - grow);
   }
 
   function spawnSpark() {
@@ -226,41 +260,77 @@
 
   function frame(now) {
     requestAnimationFrame(frame);
-    if (now - last < 33) return;               // about 30 frames a second keeps CPU use tiny
+    const busy = grow > 0.005 || target > 0;
+    if (now - last < (busy ? 33 : 80)) return;      // sphere ~30 fps, tiny dot ~12 fps (almost no CPU)
     last = now;
     t += 0.033 * (alertOn ? 2.4 : hover ? 1.5 : 1);
-    if (Math.random() < (alertOn ? 0.55 : 0.16) && sparks.length < 18) spawnSpark();
+    grow += (target - grow) * 0.24;
+    if (Math.abs(target - grow) < 0.01) grow = target;
+    if (expanded && target === 0 && grow === 0 && !down) {
+      expanded = false;
+      sparks.length = 0;
+      window.jarvis.dotSize('small');                // shrink the window so it never blocks your clicks
+    }
+    if (grow > 0.5 && Math.random() < (alertOn ? 0.55 : 0.16) && sparks.length < 18) spawnSpark();
     draw();
   }
   requestAnimationFrame(frame);
 
-  // ---------- click, drag, right-click ----------
-  const inOrb = (e) => Math.hypot(e.offsetX - C, e.offsetY - C) <= R + 6;
-  let down = false, moved = false, sx = 0, sy = 0;
+  // ---------- hover, click, drag, right-click ----------
+  const dist = (e) => Math.hypot(e.offsetX - C, e.offsetY - C);
+
+  function expand() {
+    clearTimeout(collapseTimer);
+    target = 1;
+    if (!expanded) { expanded = true; window.jarvis.dotSize('big'); }
+  }
+  function scheduleCollapse() {
+    clearTimeout(collapseTimer);
+    collapseTimer = setTimeout(() => { if (!down) { target = 0; hover = false; } }, 350);
+  }
+
+  cv.addEventListener('pointerenter', (e) => { if (dist(e) <= 18) expand(); });
+  cv.addEventListener('pointermove', (e) => {
+    if (down) {
+      if (!moved && Math.hypot(e.screenX - sx, e.screenY - sy) > 4) moved = true;
+      if (moved) window.jarvis.dragMove();
+      return;
+    }
+    const d = dist(e);
+    if (d <= (expanded ? R + 12 : 18)) { hover = d <= R + 6; expand(); }
+    else scheduleCollapse();
+  });
+  cv.addEventListener('pointerleave', () => { if (!down) scheduleCollapse(); });
 
   cv.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || !inOrb(e)) return;
+    if (e.button !== 0 || dist(e) > (expanded ? R + 6 : 18)) return;
     down = true; moved = false; sx = e.screenX; sy = e.screenY;
     cv.setPointerCapture(e.pointerId);
+    expand();
     window.jarvis.dragStart();
   });
-  cv.addEventListener('pointermove', (e) => {
-    if (!down) { hover = inOrb(e); return; }
-    if (!moved && Math.hypot(e.screenX - sx, e.screenY - sy) > 4) moved = true;
-    if (moved) window.jarvis.dragMove();
-  });
-  cv.addEventListener('pointerleave', () => { hover = false; });
   cv.addEventListener('pointerup', (e) => {
     if (!down) return;
     down = false;
     cv.releasePointerCapture(e.pointerId);
-    if (!moved) { alertOn = false; window.jarvis.dotClick(); }
+    if (moved) {
+      window.jarvis.dragEnd();                       // remembers where you left the dot
+      if (dist(e) > R + 12) scheduleCollapse();
+    } else {
+      alertOn = false; target = 0; grow = 0; expanded = false; hover = false;
+      window.jarvis.dotClick();                      // opens the panel, same as before
+    }
   });
   cv.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     window.jarvis.dotMenu();
   });
+
   window.jarvis.onAlert(() => { alertOn = true; });
+  window.jarvis.onDotReset(() => {                   // the panel opened: go back to the tiny dot
+    alertOn = false; target = 0; grow = 0; expanded = false; hover = false; down = false;
+    sparks.length = 0;
+  });
 </script>
 </body>
 </html>
